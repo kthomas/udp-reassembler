@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -13,6 +15,12 @@ import (
 )
 
 var wg sync.WaitGroup
+var messages map[uint64][]byte
+var mutex = &sync.Mutex{}
+
+func ReassembleMessages() {
+	main()
+}
 
 func main() {
 	protocol := "udp"
@@ -21,19 +29,17 @@ func main() {
 	conn, err := bind(protocol, port)
 
 	if err == nil {
-		var concurrency int = 1
-		if os.Getenv("CONCURRENCY") != "" {
-			concurrency64, _ := strconv.ParseInt(os.Getenv("CONCURRENCY"), 10, 8)
-			concurrency = int(concurrency64)
-		}
+		messages = make(map[uint64][]byte)
 
-		msg := fmt.Sprintf("Reading shared UDP port %s; concurrency: %v", port, concurrency)
-		fmt.Println(msg)
+		concurrency := getConcurrency()
 
 		for i := 0; i < concurrency; i++ {
 			wg.Add(1)
 			go read(conn)
 		}
+
+		wg.Add(1)
+		go watchMessages()
 
 		wg.Wait()
 	}
@@ -59,16 +65,13 @@ func bind(protocol string, port string) (*net.UDPConn, error) {
 
 func read(conn *net.UDPConn) {
 	for {
-		conn.SetReadDeadline(time.Now().Add(30 * time.Second))
-		var buf [256]byte
-		n, addr, err := conn.ReadFromUDP(buf[0:])
+		var buf [512]byte
+		n, _, err := conn.ReadFromUDP(buf[0:])
 		if err != nil {
 			msg := fmt.Sprintf("Failed to read on UDP connection; %s", err)
 			fmt.Println(msg)
 			break
 		} else if n > 0 {
-			msg := fmt.Sprintf("Read %v-byte UDP packet from %s", n, addr)
-			fmt.Println(msg)
 			process(buf[0:n])
 		}
 	}
@@ -76,14 +79,101 @@ func read(conn *net.UDPConn) {
 }
 
 func process(packet []byte) {
-	// see https://tools.ietf.org/html/rfc815
 	reader := bitstream.NewReader(bytes.NewReader(packet))
-	flags, _ := reader.ReadBits(15)
-	size, _ := reader.ReadBits(16)
-	offset, _ := reader.ReadBits(32)
-	transactionId, _ := reader.ReadBits(32)
-	data, _ := reader.ReadBits(int(size))
 
-	msg := fmt.Sprintf("flags = %v; size = %v; offset = %v, transactionId = %v, data = %s", flags, size, offset, transactionId, data)
-	fmt.Println(msg)
+	flags, err := reader.ReadBits(16)
+	checkPacketError(err)
+	eof := flags == 0x8000
+
+	dataSize, err := reader.ReadBits(16)
+	checkPacketError(err)
+
+	offset, err := reader.ReadBits(32)
+	checkPacketError(err)
+
+	transactionId, err := reader.ReadBits(32)
+	checkPacketError(err)
+
+	var buf []byte
+
+	mutex.Lock()
+	defer mutex.Unlock()
+
+	if eof {
+		buf = getMessageBuffer(transactionId, uint32(dataSize))
+	} else {
+		buf = getMessageBuffer(transactionId, 1024 * 1024)
+	}
+
+	packetSize := len(packet) - 12
+
+	if packetSize > 0 {
+		pkt := make([]byte, packetSize)
+		copy(pkt, packet[12:])
+		if int(offset) + packetSize < len(buf) {
+			copy(buf[offset:], pkt)
+		}
+	}
+}
+
+func checkPacketError(err error) {
+	if err != nil {
+		msg := fmt.Sprintf("Error processing packet: %s", err)
+		fmt.Println(msg)
+	}
+}
+
+func getConcurrency() (int) {
+	var concurrency int = 1
+	if os.Getenv("CONCURRENCY") != "" {
+		concurrency64, _ := strconv.ParseInt(os.Getenv("CONCURRENCY"), 10, 8)
+		concurrency = int(concurrency64)
+	}
+	return concurrency
+}
+
+func getMessageBuffer(transactionId uint64, size uint32) ([]byte) {
+	msg, ok := messages[transactionId]
+	if !ok {
+		msg = make([]byte, size)
+		messages[transactionId] = msg
+	}
+	return msg
+}
+
+func getMessage(transactionId uint64) (string) {
+	msg := messages[transactionId]
+	msg = bytes.Trim(msg, "\x00")
+	return string(msg)
+}
+
+func getMessageSHA(transactionId uint64) (string) {
+	hash := sha256.New()
+	n, err := hash.Write([]byte(getMessage(transactionId)))
+	if err != nil {
+		msg := fmt.Sprintf("Error calculating sha256 for message; transactionId = %v", n)
+		fmt.Println(msg)
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func watchMessages() {
+	for {
+		time.Sleep(time.Second * 5)
+		if len(messages) == 10 {
+			i := 1
+			for k, v := range messages {
+				buf := bytes.Trim(v, "\x00")
+
+				msg := fmt.Sprintf("Message #%v length: %v sha256:%s", i, len(buf), getMessageSHA(k))
+				fmt.Println(msg)
+
+				i++
+			}
+
+			wg.Add(-getConcurrency())
+			break
+		}
+	}
+	defer wg.Done()
 }
