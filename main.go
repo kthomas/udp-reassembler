@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -123,7 +125,7 @@ func checkPacketError(err error) {
 	}
 }
 
-func getConcurrency() (int) {
+func getConcurrency() int {
 	var concurrency int = 1
 	if os.Getenv("CONCURRENCY") != "" {
 		concurrency64, _ := strconv.ParseInt(os.Getenv("CONCURRENCY"), 10, 8)
@@ -132,7 +134,7 @@ func getConcurrency() (int) {
 	return concurrency
 }
 
-func getMessageBuffer(transactionId uint64, size uint32) ([]byte) {
+func getMessageBuffer(transactionId uint64, size uint32) []byte {
 	msg, ok := messages[transactionId]
 	if !ok {
 		msg = make([]byte, size)
@@ -141,13 +143,13 @@ func getMessageBuffer(transactionId uint64, size uint32) ([]byte) {
 	return msg
 }
 
-func getMessage(transactionId uint64) (string) {
+func getMessage(transactionId uint64) string {
 	msg := messages[transactionId]
 	msg = bytes.Trim(msg, "\x00")
 	return string(msg)
 }
 
-func getMessageSHA(transactionId uint64) (string) {
+func getMessageSHA(transactionId uint64) string {
 	hash := sha256.New()
 	n, err := hash.Write([]byte(getMessage(transactionId)))
 	if err != nil {
@@ -165,6 +167,12 @@ func watchMessages() {
 			for k, v := range messages {
 				buf := bytes.Trim(v, "\x00")
 
+				//holes := findHoles(buf)
+				//for hole := range holes {
+				//	msg := fmt.Sprintf("Message #%v hole at: %v", k, holes[hole])
+				//	fmt.Println(msg)
+				//}
+
 				msg := fmt.Sprintf("Message #%v length: %v sha256:%s", i, len(buf), getMessageSHA(k))
 				fmt.Println(msg)
 
@@ -176,4 +184,31 @@ func watchMessages() {
 		}
 	}
 	defer wg.Done()
+}
+
+func findHoles(buf []byte) []int {
+	holes := []int{}
+	str := string(buf)
+	index := strings.Index(str, "\x00")
+	if index != -1 {
+		i := index
+		holes = []int{ i }
+		i++
+		str = string(str[i:])
+		holeSlice := findHoles([]byte(str))
+		for idx := range holeSlice {
+			unique := true
+			for x := range holes {
+				if holes[x] == holeSlice[idx] {
+					unique = false
+					break
+				}
+			}
+			if unique {
+				holes = append(holes, holeSlice[idx])
+			}
+		}
+	}
+	sort.Ints(holes)
+	return holes
 }

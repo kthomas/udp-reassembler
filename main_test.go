@@ -40,6 +40,11 @@ func TestReassembleMessages(t *testing.T) {
 		}
 		if !matched {
 			t.Logf("Failed to match %s", sha256)
+			holes := findHoles([]byte(buf))
+			for hole := range holes {
+				t.Logf("Message #%v hole at: %v", idx, holes[hole])
+			}
+
 			t.Fail()
 		} else {
 			t.Logf("Message #%v length: %v sha256:%s", idx, len(buf), sha256)
